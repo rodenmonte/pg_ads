@@ -1,0 +1,5 @@
+comment = 'pg_ads:  Created by pgx'
+default_version = '@CARGO_VERSION@'
+module_pathname = '$libdir/pg_ads'
+relocatable = false
+superuser = false

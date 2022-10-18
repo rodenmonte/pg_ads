@@ -1,0 +1,12 @@
+- name: New longest part description
+  unique: False
+  table: parts
+  schema: test
+  attribute: max(len(description))
+
+- name: Alert on another thing
+  unique: true
+  table: parts
+  schema: test
+  attribute: max(len(description))
+
