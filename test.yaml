@@ -1,12 +1,17 @@
-- name: New longest part description
-  unique: False
+- name: New highest part price
   table: parts
-  schema: test
-  attribute: max(len(description))
+  aggregate: max
+  column: price
+  column_type: int
 
-- name: Alert on another thing
-  unique: true
+- name: New minimum part price
   table: parts
-  schema: test
-  attribute: max(len(description))
+  aggregate: min
+  column: price
+  column_type: int
 
+- name: New avg part price
+  table: parts
+  aggregate: avg
+  column: price
+  column_type: int
