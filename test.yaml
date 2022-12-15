@@ -2,16 +2,20 @@
   table: parts
   aggregate: max
   column: price
-  column_type: int
+  column_type: real
+  threshold: 10
 
 - name: New minimum part price
   table: parts
   aggregate: min
   column: price
-  column_type: int
+  column_type: real
+  threshold: 0.10
 
 - name: New avg part price
   table: parts
   aggregate: avg
   column: price
-  column_type: int
+  column_type: real
+  threshold_max: 10
+  threshold_min: 0.10

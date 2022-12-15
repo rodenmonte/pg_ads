@@ -1,81 +1,6 @@
+#!/usr/bin/env ruby
+
 require 'yaml'
-
-<<~BLORG
-Notes and psuedocode:
-TODO: Use statement triggers instead of row triggers
-
-* Use calls fn
-* Read in YAML file
-* Convert YAML file into tables, functions, and triggers (deterministically? In a transaction?)
--- Do this part later
-* Create pg_ads_triggers table if doesn't exist
-* Write from YAML file here
-* Delete rows in pg_ads_triggers and pg_triggers that don't correspond to YAML entries
--- End later
-*
-*
-
-
-create table if not exists parts (
-    id serial,
-    price int
-);
-
--- TODO: Put pg_ads tables into their own schema
-create table if not exists pg_ads__tbl_parts_max_price (
-    max_price int
-);
-
-insert into parts(price) values (3);
-
-
--- Just testing fns
-create or replace function testy() returns void as $$
-declare
-  agg_val int;
-begin
-  select max(price) into agg_val from parts;
-  if 3 = agg_val then
-    raise notice 'IT BIG';
-  end if;
-end;
-$$ language plpgsql;
-
-
-create or replace function pg_ads__fn_parts_max_price() returns trigger as $$
-declare
-  agg_val int; -- TODO: Change type based off YAML
-begin
-  -- TODO: Replace agg op, column, and table
-  select max(max_price) into agg_val from pg_ads__tbl_parts_max_price;
-  -- Unhappy case, the old max is deleted
-  IF (
-      ((TG_OP = 'DELETE") and OLD.price = agg_val) or
-      ((TG_OP = 'UPDATE') and OLD.price > NEW.price)
-     ) THEN
-    update pg_ads__tbl_parts_max_price set max_price = (select max(price) from parts) where max_price = agg_val;
-  elsif (
-      ((TG_OP = 'UPDATE") and OLD.price < NEW.price) or
-      ((TG_OP = 'INSERT') and NEW.price > agg_val)
-     ) THEN
-     update pg_ads__tbl_parts_max_price set max_price = NEW.price where max_price = agg_val;
-  end if;
-  return null;
-end;
-$$ language plpgsql;
-
-
-
-
-
-create or replace function pg_ads__fn_parts_max_price() returns trigger as $$
-begin
-  IF (TG_OP = 'DELETE") THEN
-    OLD.max_price = ANY (
-    insert into pg_ads__tbl_parts_max_price select 'd'
-end;
-$$ language plpgsql;
-BLORG
 
 class Anomaly
   SUPPORTED_AGGREGATES = ['max', 'min', 'avg']
@@ -84,11 +9,17 @@ class Anomaly
 
   def initialize(hsh)
     @name = hsh['name']
-    @table = hsh['parts']
+    @table = hsh['table']
     @aggregate = assign_aggregate hsh['aggregate']
     @column = hsh['column']
     # TODO: Derive type, don't make the user specify
     @column_type = hsh['column_type']
+    if aggregate == 'avg'
+      @threshold_min = hsh['threshold_min']
+      @threshold_max = hsh['threshold_max']
+    else
+      @threshold = hsh['threshold']
+    end
   end
 
   def to_table
@@ -96,7 +27,7 @@ class Anomaly
       when 'max', 'min'
         { column_name => column_type }
       when 'avg'
-        { column_name => column_type, 'n_records' => 'int' }
+        { column_name => column_type, 'nb_rows' => 'int' }
       else
         raise 'WTF'
       end
@@ -113,9 +44,19 @@ class Anomaly
     create or replace function #{trigger_fn_name}() returns trigger as $$
       declare
         agg_val #{column_type};
+        #{
+          if aggregate == 'avg'
+            "nb_rows_fn int;"
+          end
+        }
       begin
         select #{aggregate}(#{column_name}) into agg_val from #{internal_table};
-        -- Unhappy case, the old `aggregate` is deleted
+        #{
+          if aggregate == 'avg'
+            "select nb_rows into nb_rows_fn from #{internal_table};"
+          end
+        }
+        -- If the the old `aggregate` is deleted
         #{self.send(:"#{aggregate}_trigger")}
         return null;
       end;
@@ -125,24 +66,36 @@ class Anomaly
 
   def to_trigger
     <<~SQL
-      CREATE TRIGGER #{trigger_name} AFTER INSERT ON #{table}
-      FOR EACH ROW EXECUTE PROCEDURE #{trigger_fn_name}()
+      CREATE OR REPLACE TRIGGER #{trigger_name}_ins AFTER INSERT ON #{table}
+      FOR EACH ROW EXECUTE PROCEDURE #{trigger_fn_name}();
+      CREATE OR REPLACE TRIGGER #{trigger_name}_upd AFTER UPDATE ON #{table}
+      FOR EACH ROW EXECUTE PROCEDURE #{trigger_fn_name}();
+      CREATE OR REPLACE TRIGGER #{trigger_name}_del AFTER DELETE ON #{table}
+      FOR EACH ROW EXECUTE PROCEDURE #{trigger_fn_name}();
     SQL
   end
 
   private
 
   def trigger_name
-    "pg_ads__trigger_#{table}_#{column_name}"
+    "pg_ads__trigger_#{table}_#{column_name}_#{threshold_id}"
   end
 
   # TODO: Use a pg_ads schema instead of pg_ads__ prefixes
   def trigger_fn_name
-    "pg_ads__fn_#{table}_#{column_name}"
+    "pg_ads__fn_#{table}_#{column_name}_#{threshold_id}"
   end
 
   def internal_table
-    "pg_ads__tbl_#{table}_#{column_name}"
+    "pg_ads__tbl_#{table}_#{column_name}_#{threshold_id}"
+  end
+
+  def threshold_id
+    if aggregate == 'avg'
+      "#{@threshold_min}__#{@threshold_max}".gsub(".", "_")
+    else
+      "#{@threshold}".gsub(".", "_")
+    end
   end
 
   def column_name
@@ -169,6 +122,11 @@ class Anomaly
 
     <<~SQL
     IF (
+      ((TG_OP = 'INSERT') AND agg_val IS NULL AND NEW.#{column} IS NOT NULL)
+    ) THEN
+  
+      INSERT INTO #{internal_table} (#{column_name}) VALUES (NEW.#{column});
+    ELSIF (
       ((TG_OP = 'DELETE') AND OLD.#{column} = agg_val) OR
       ((TG_OP = 'UPDATE') AND NEW.#{column} #{new_column_sad_case} OLD.#{column})
     ) THEN
@@ -184,6 +142,12 @@ class Anomaly
       SET #{column_name} = NEW.#{column}
       WHERE #{column_name} = agg_val;
     END IF;
+    select #{aggregate}(#{column_name}) into agg_val from #{internal_table};
+    IF (
+      agg_val #{new_column_happy_case} #{@threshold}
+    ) THEN
+      RAISE NOTICE 'ALERT! #{aggregate.upcase} VALUE % VIOLATES #{aggregate.upcase} THRESHOLD #{@threshold}', agg_val;
+    END IF;
     SQL
   end
 
@@ -198,27 +162,60 @@ class Anomaly
   def avg_trigger
     <<~SQL
     IF (
-      ((TG_OP = 'DELETE') AND OLD.#{column} = agg_val) OR
-      ((TG_OP = 'UPDATE') AND NEW.#{column} #{'avg'} OLD.#{column})
+      (TG_OP = 'INSERT' AND agg_val IS NULL)
+    ) THEN
+      INSERT INTO #{internal_table} (#{column_name}, nb_rows) VALUES (NEW.#{column}, 1);
+    ELSIF (
+      (TG_OP = 'INSERT')
     ) THEN
       UPDATE #{internal_table} SET #{column_name} = (
-        select #{aggregate}(#{column}) FROM #{table}
-      )
-      WHERE #{column_name} = agg_val;
+        agg_val + ((NEW.#{column} - agg_val) / (nb_rows_fn + 1))
+      );
+      UPDATE #{internal_table} SET nb_rows = (nb_rows_fn + 1);
     ELSIF (
-      ((TG_OP = 'UPDATE') AND NEW.#{column} #{'avg'} OLD.#{column}) OR
-      ((TG_OP = 'INSERT') AND NEW.#{column} #{'avg'} agg_val)
+      (TG_OP = 'DELETE')
     ) THEN
-      UPDATE #{internal_table}
-      SET #{column_name} = NEW.#{column}
-      WHERE #{column_name} = agg_val;
+      IF (nb_rows_fn = 1) THEN
+        TRUNCATE #{internal_table};
+      ELSE
+        UPDATE #{internal_table} SET #{column_name} = (
+          ((agg_val * nb_rows_fn) - OLD.#{column}) / (nb_rows_fn - 1)
+        );
+      END IF;
+      UPDATE #{internal_table} SET nb_rows = (nb_rows_fn - 1);
+    ELSIF (
+      (TG_OP = 'UPDATE')
+    ) THEN
+      UPDATE #{internal_table} SET #{column_name} = (
+        ((agg_val * nb_rows_fn) - OLD.#{column}) / (nb_rows_fn - 1)
+      );
+      UPDATE #{internal_table} SET nb_rows = (nb_rows_fn + 1);
+      -- could replace this select with better math, but.....
+      select #{aggregate}(#{column_name}) into agg_val from #{internal_table};
+      select nb_rows into nb_rows_fn from #{internal_table};
+
+      UPDATE #{internal_table} SET #{column_name} = (
+        agg_val + ((NEW.#{column} - agg_val) / nb_rows_fn)
+      );
+      UPDATE #{internal_table} SET nb_rows = (nb_rows_fn - 1);
+    END IF;
+    select #{aggregate}(#{column_name}) into agg_val from #{internal_table};
+    IF (
+      agg_val > #{@threshold_max} OR
+      agg_val < #{@threshold_min}
+    ) THEN
+      RAISE NOTICE 'ALERT! AVERAGE % VIOLATES AVG THRESHOLD RANGE #{@threshold_min} TO #{@threshold_max}', NEW.#{column};
     END IF;
     SQL
   end
 end
 
 def read_yaml
-  YAML.load_file('test.yaml')
+  f = ARGV[0] || 'test.yaml'
+  YAML.load_file f
+rescue
+  puts "File #{f} couldn't be found, exiting..."
+  exit 1
 end
 
 # yml is an array of hashes
@@ -227,6 +224,7 @@ def yaml_to_anomalies(yml = read_yaml)
 end
 
 yaml_to_anomalies.each do |anom|
+  puts "RAISE NOTICE 'RUNNING PG_ADS SETUP SCRIPT';"
   puts anom.to_table
   puts anom.to_trigger_fn
   puts anom.to_trigger
