@@ -1,6 +1,10 @@
 #!/usr/bin/env ruby
 PORT = 5433 # Change to 5432 before pushing to git!
 SQL_PREAMBLE = <<~SQL
+SELECT 'DROP TRIGGER ' || trigger_name || ' ON ' || event_object_table || ';'
+FROM information_schema.triggers
+WHERE trigger_schema = 'public';
+
 -- Drop pg_ads tables
 DO
 $do$
@@ -29,22 +33,18 @@ create table parts (
 SQL
 
 def insert
-  "insert into parts (price, name) values (#{rand(0.01..1000.00)}, #{(0...8).map { (65 + rand(26)).chr }.join});"
+  "insert into parts (price, name) values (#{rand(1..100)}, 'asdf');"
 end
 
 def delete
   <<~SQL
-  DELETE FROM parts WHERE id = (
-    SELECT id FROM parts ORDER BY random() LIMIT 1
-  );
+  DELETE FROM parts WHERE id = (SELECT max(id))
   SQL
 end
 
 def update
   <<~SQL
-  UPDATE parts SET price = #{rand(0.01..1000.00)} WHERE id = (
-    SELECT id FROM parts ORDER BY random() LIMIT 1
-  );
+  UPDATE parts SET price = #{rand(0.01..1000.00)} WHERE id = 1
   SQL
 end
 
@@ -58,49 +58,68 @@ def alert(alert_type)
   aggregate: #{alert_type}
   column: price
   column_type: real
+  #{
+    if alert_type == 'avg'
+      min = rand(0.01..1000.00)
+      max = rand(0.01..1000.00)
+      if max < min
+        max = min
+      end
+  <<~SUB
+  threshold_max: #{max}
+  threshold_min: #{min}
+  SUB
+    else
+  <<~SUB
   threshold: #{rand(0.01..1000.00)}
+  SUB
+    end
+  }
   YAML
 end
 
 def run_experiment(exp_type, operation_count, alert_count, alert_type = 'max')
-  puts "GENERATING..."
+  # puts "GENERATING..."
   ops = case exp_type
   when 'INSERT'
     (1..operation_count).map { insert }
   when 'UPDATE'
-    (1..operation_count).map { update }
+    (1..operation_count).flat_map { [insert, update] }
   when 'DELETE'
-    (1..operation_count).map { delete }
+    (1..operation_count).flat_map { [insert, delete] }
   when 'MIXED'
     (1..operation_count).map { [insert, update, delete].sample }
   end
   alerts = (1..alert_count).map { alert(alert_type) }
 
-  puts "GENERATED, WRITING..."
+  # puts "GENERATED, WRITING..."
   File.open('/tmp/preamble.sql', 'w') { |f| f.write(SQL_PREAMBLE) }
   File.open('/tmp/alerts.yml', 'w') { |f| f.write(alerts.join("\n")) }
   `./ruby_version.rb /tmp/alerts.yml > /tmp/alert_sql.sql 2>/dev/null`
   File.open('/tmp/tmp.sql', 'w') { |f| f.write(ops.join("\n")) }
-  puts "WRITTEN, PREPPING DB"
+  # puts "WRITTEN, PREPPING DB"
   `psql -p #{PORT} -f /tmp/preamble.sql > /dev/null 2>&1`
   `psql -p #{PORT} -f /tmp/alert_sql.sql > /dev/null 2>&1`
+  # `psql -p #{PORT} -f /tmp/preamble.sql`
+  # `psql -p #{PORT} -f /tmp/alert_sql.sql`
+
   # `time psql -p #{PORT} -f /tmp/tmp.sql > /dev/null 2>&1`
-  puts "DB PREPPED, GO TIME"
+  # puts "DB PREPPED, GO TIME"
   puts("type: #{exp_type}, op_count #{operation_count}, alert_count #{alert_count}, alert_type #{alert_type}")
   `/usr/bin/time -f "%e" sh -c '"$0" "$@" >/dev/null 2>&1' psql -p #{PORT} -f /tmp/tmp.sql`
-  puts "NEXT"
+  # puts "NEXT"
 end
 
-exp_types = ['UPDATE', 'INSERT', 'DELETE', 'MIXED']
-# op_counts = [1000, 10_000, 2_000_000]
-# alert_counts = [0, 1, 10, 1000, 10_000, 100_000]
-op_counts = [10_000]
-alert_counts = [10_000]
-alert_types = ['max', 'min', 'avg', 'random']
-exp_types.each do |exp_type|
-  op_counts.each do |op_count|
-    alert_counts.each do |alert_count|
-      alert_types.each do |alert_type|
+# exp_types = ['UPDATE', 'INSERT', 'DELETE', 'MIXED']
+# alert_types = ['max', 'min', 'avg', 'random']
+exp_types = ['MIXED' ]
+alert_types = ['max']
+op_counts = [100, 1000, 5000]
+alert_counts = [0, 10, 50, 100, 250, 500]
+alert_types.each do |alert_type|
+  alert_counts.each do |alert_count|
+    op_counts.each do |op_count|
+      exp_types.each do |exp_type|
         run_experiment(exp_type, op_count, alert_count, alert_type)
       end
     end

@@ -224,7 +224,6 @@ def yaml_to_anomalies(yml = read_yaml)
 end
 
 yaml_to_anomalies.each do |anom|
-  puts "RAISE NOTICE 'RUNNING PG_ADS SETUP SCRIPT';"
   puts anom.to_table
   puts anom.to_trigger_fn
   puts anom.to_trigger

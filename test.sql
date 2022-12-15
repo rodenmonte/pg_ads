@@ -1,3 +1,5 @@
+drop schema public; -- fast way to drop triggers
+create schema public;
 -- Drop pg_ads tables
 DO
 $do$

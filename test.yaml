@@ -1,18 +1,18 @@
-- name: New highest part price
+- name: Unusually high part price
   table: parts
   aggregate: max
   column: price
   column_type: real
   threshold: 10
 
-- name: New minimum part price
+- name: Unusually low part price
   table: parts
   aggregate: min
   column: price
   column_type: real
   threshold: 0.10
 
-- name: New avg part price
+- name: Unusually average part price
   table: parts
   aggregate: avg
   column: price
